@@ -29,7 +29,6 @@
 #include <fmt/format.h>
 #include <limits>
 #include <string_view>
-#include <thread>
 #include <unordered_set>
 #include <utility>
 #include "kv_protocol.h"
@@ -128,12 +127,14 @@ std::chrono::milliseconds Milliseconds(std::size_t value)
         std::min<std::size_t>(value, static_cast<std::size_t>(std::numeric_limits<Rep>::max())))};
 }
 
-std::size_t DerivedWorkerCount(std::size_t nodeCount)
+std::size_t DerivedRunnerCount(std::size_t nodeCount)
 {
-    const auto hardwareThreads =
-        std::max<std::size_t>(1, static_cast<std::size_t>(std::thread::hardware_concurrency()));
-    const auto threadsPerSubsystem = std::max<std::size_t>(1, hardwareThreads / 2);
-    return std::min(nodeCount, threadsPerSubsystem);
+    // The NodeScheduler drives the per-node actor state machines (event loop,
+    // retry, fence). One runner can service many nodes, but extra runners
+    // beyond nodeCount buy nothing (a node is bound to exactly one runner
+    // by hash). Cap at 4 so small topologies do not spawn a runner per node
+    // on many-core hosts, while large topologies still parallelize up to 4.
+    return std::min<std::size_t>(nodeCount, 4);
 }
 
 }  // namespace
@@ -216,8 +217,27 @@ Expected<DramConfig> DramConfig::Parse(const Detail::Dictionary& dictionary)
         const auto maxBatch =
             std::min({result.maxIoEntries, kTargetBatchEntries, kMaxProtocolBatchEntries});
         result.nodeScheduler.limits = NodeLimits{maxInflight, maxBatch};
-        result.nodeScheduler.runnerCount = DerivedWorkerCount(result.nodeScheduler.nodes.size());
-        result.transportRuntime.workerCount = DerivedWorkerCount(result.nodeScheduler.nodes.size());
+        // Default workerCount=1 (TransportExecutor hashes commands by nodeId,
+        // so workerCount>1 only helps when nodeCount>1; the safe default is
+        // single-worker serialization, users opt into parallelism explicitly).
+        // Default runnerCount=min(4, nodeCount) so a small topology gets one
+        // runner per node (no cross-node contention) and a large one caps at
+        // four scheduler threads. Either can be overridden independently via
+        // the dictionary keys below.
+        result.nodeScheduler.runnerCount = DerivedRunnerCount(result.nodeScheduler.nodes.size());
+        result.transportRuntime.workerCount = 1;
+        if (dictionary.Contains("transport_worker_count")) {
+            std::size_t wc = 0;
+            if (OptionalSize(dictionary, "transport_worker_count", &wc).Success() && wc > 0) {
+                result.transportRuntime.workerCount = wc;
+            }
+        }
+        if (dictionary.Contains("node_runner_count")) {
+            std::size_t rc = 0;
+            if (OptionalSize(dictionary, "node_runner_count", &rc).Success() && rc > 0) {
+                result.nodeScheduler.runnerCount = rc;
+            }
+        }
 
         if (maxInflight != 0 && result.nodeScheduler.nodes.size() >
                                     std::numeric_limits<std::size_t>::max() / maxInflight) {

@@ -54,6 +54,9 @@ public:
     virtual Status Connect(const ::UC::Dram::Connect& command) noexcept = 0;
     // Success synchronously proves that the old epoch can no longer access client memory.
     virtual Status Fence(const ::UC::Dram::FenceEpoch& command) noexcept = 0;
+    // Re-export local registered memory to all peers so they pick up regions
+    // registered after the initial connect (e.g. KV caches registered post-Setup).
+    virtual Status RefreshMemoryAdvertisement() noexcept { return Status::OK(); }
     virtual void Stop() = 0;
 };
 

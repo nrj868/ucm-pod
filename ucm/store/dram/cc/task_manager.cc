@@ -207,6 +207,9 @@ std::vector<Request> TaskManager::BuildRequests(OpType op, std::vector<IoEntry> 
 
     const auto routed = dependencies_.router->RouteKeys(keys);
     const auto batchLimit = std::min(config_.requestBatchEntries, kMaxProtocolBatchEntries);
+    for (const auto& [node, indexes] : routed) {
+        UC_DEBUG("BuildRequests: route node={} entries={}", node, indexes.size());
+    }
     std::vector<Request> requests;
     requests.reserve(routed.size());
     for (const auto& [node, indexes] : routed) {

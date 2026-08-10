@@ -149,9 +149,6 @@ Expected<ReplySlot> ReplyService::Acquire(const RequestToken& token, OpType op,
     }
 
     const auto allocated = buffers_.Allocate(slot);
-    if (allocated == Status::NoSpace()) {
-        return Status::Error("ReplyService slot capacity invariant violated");
-    }
     if (allocated.Failure()) { return allocated; }
     if (slot.slot_index >= options_.slotCount || slot.local_addr == nullptr || slot.length == 0 ||
         !buffers_.IsValidPointer(slot.local_addr)) {
@@ -188,55 +185,47 @@ Expected<ReplySlot> ReplyService::Acquire(const RequestToken& token, OpType op,
 
 Status ReplyService::Release(const RequestToken& token, const ReplySlot& slot) noexcept
 {
-    try {
-        const auto index = static_cast<std::size_t>(slot.slot_index);
-        if (index >= options_.slotCount) {
-            return Status::InvalidParam("reply slot is not leased");
-        }
+    const auto index = static_cast<std::size_t>(slot.slot_index);
+    if (index >= options_.slotCount) { return Status::InvalidParam("reply slot is not leased"); }
 
-        auto& context = slotContexts_[index];
-        std::unique_lock slotLock(context.mutex);
-        if (!context.lease.has_value()) { return Status::InvalidParam("reply slot is not leased"); }
-        const auto& lease = *context.lease;
-        if (lease.token != token || lease.slot.local_addr != slot.local_addr ||
-            lease.slot.length != slot.length) {
-            return Status::InvalidParam("reply slot ownership mismatch");
-        }
-
-        {
-            std::lock_guard registryLock(activeLeasesMutex_);
-            const auto activePosition = activeLeasePositions_[index];
-            if (activePosition >= activeLeaseIndices_.size() ||
-                activeLeaseIndices_[activePosition] != index) {
-                return Status::Error("reply active-lease index invariant violated");
-            }
-        }
-
-        // Free may clear the complete slot. Keep only this slot locked while it
-        // does so; a concurrent Acquire of the same index will wait for slotLock.
-        auto result = buffers_.Free(slot.slot_index);
-        if (result.Failure()) { return result; }
-
-        {
-            std::lock_guard registryLock(activeLeasesMutex_);
-            const auto activePosition = activeLeasePositions_[index];
-            if (activePosition >= activeLeaseIndices_.size() ||
-                activeLeaseIndices_[activePosition] != index) {
-                AbortDramStore(
-                    Status::Error("reply active-lease index changed unexpectedly during release"));
-            }
-            const auto lastIndex = activeLeaseIndices_.back();
-            activeLeaseIndices_[activePosition] = lastIndex;
-            activeLeasePositions_[lastIndex] = activePosition;
-            activeLeaseIndices_.pop_back();
-            activeLeasePositions_[index] = kNoIndex;
-            context.lease.reset();
-            ++activeLeaseVersion_;
-        }
-        return result;
-    } catch (...) {
-        AbortDramStore(Status::Error("ReplyService failed to release a reply lease"));
+    auto& context = slotContexts_[index];
+    std::unique_lock slotLock(context.mutex);
+    if (!context.lease.has_value()) { return Status::InvalidParam("reply slot is not leased"); }
+    const auto& lease = *context.lease;
+    if (lease.token != token || lease.slot.local_addr != slot.local_addr ||
+        lease.slot.length != slot.length) {
+        return Status::InvalidParam("reply slot ownership mismatch");
     }
+
+    {
+        std::lock_guard registryLock(activeLeasesMutex_);
+        const auto activePosition = activeLeasePositions_[index];
+        if (activePosition >= activeLeaseIndices_.size() ||
+            activeLeaseIndices_[activePosition] != index) {
+            return Status::Error("reply active-lease index invariant violated");
+        }
+    }
+
+    // Free may clear the complete slot. Keep only this slot locked while it
+    // does so; a concurrent Acquire of the same index will wait for slotLock.
+    auto result = buffers_.Free(slot.slot_index);
+    if (result.Failure()) { return result; }
+
+    {
+        std::lock_guard registryLock(activeLeasesMutex_);
+        const auto activePosition = activeLeasePositions_[index];
+        if (activePosition >= activeLeaseIndices_.size()) {
+            return Status::Error("reply active-lease index changed unexpectedly during release");
+        }
+        const auto lastIndex = activeLeaseIndices_.back();
+        activeLeaseIndices_[activePosition] = lastIndex;
+        activeLeasePositions_[lastIndex] = activePosition;
+        activeLeaseIndices_.pop_back();
+        activeLeasePositions_[index] = kNoIndex;
+        context.lease.reset();
+        ++activeLeaseVersion_;
+    }
+    return result;
 }
 
 void ReplyService::Run() noexcept
