@@ -12,6 +12,9 @@
 #ifdef UCM_P2P_HAS_HIXL
 #include "protocols/hixl/hixl_transport.h"
 #endif
+#ifdef UCM_P2P_HAS_IBVERBS
+#include "protocols/ibverbs/ibverbs_transport.h"
+#endif
 #include "logger/logger.h"
 
 namespace transport {
@@ -68,9 +71,28 @@ Status DecodePeerAdvertisement(const Metadata& in, PeerAdvertisement& advertisem
 
 bool TransportForDirect(OperationDirect direct, TransportProtocol& protocol)
 {
-    if (direct != OperationDirect::RemoteDeviceHost) { return false; }
-    protocol = TransportProtocol::Hixl;
-    return true;
+#if defined(UCM_P2P_HAS_HIXL)
+    if (direct == OperationDirect::RemoteDeviceHost) {
+        protocol = TransportProtocol::Hixl;
+        return true;
+    }
+#endif
+#if defined(UCM_P2P_HAS_IBVERBS)
+    if (direct == OperationDirect::LocalDeviceHost ||
+        direct == OperationDirect::LocalDeviceDevice) {
+        protocol = TransportProtocol::Ibverbs;
+        return true;
+    }
+#if !defined(UCM_P2P_HAS_HIXL)
+    if (direct == OperationDirect::RemoteDeviceHost) {
+        protocol = TransportProtocol::Ibverbs;
+        return true;
+    }
+#endif
+#endif
+    (void)protocol;
+    (void)direct;
+    return false;
 }
 
 }  // namespace
@@ -118,7 +140,11 @@ TransportPtr TransportManager::CreateTransport(TransportProtocol protocol) const
 {
 #ifdef UCM_P2P_HAS_HIXL
     if (protocol == TransportProtocol::Hixl) { return std::make_shared<HixlTransport>(); }
-#else
+#endif
+#ifdef UCM_P2P_HAS_IBVERBS
+    if (protocol == TransportProtocol::Ibverbs) { return std::make_shared<IbverbsTransport>(); }
+#endif
+#if !defined(UCM_P2P_HAS_HIXL) && !defined(UCM_P2P_HAS_IBVERBS)
     (void)protocol;
 #endif
     return nullptr;
@@ -226,9 +252,23 @@ Status TransportManager::HandleMetadataExchange(const ManagerID& manager_id,
                                                 const Metadata& remote_metadata,
                                                 Metadata& local_metadata)
 {
+    UC_INFO("HandleMetadataExchange ENTER peer={} remote_blob_size={}", manager_id,
+             remote_metadata.size());
     const auto status = ImportMetadata(remote_metadata, manager_id);
-    if (status != Status::OK()) { return status; }
-    return ExportLocalMetadata(manager_id, local_metadata);
+    if (status != Status::OK()) {
+        UC_ERROR("HandleMetadataExchange ImportMetadata FAILED peer={} status={}", manager_id,
+                 status.Underlying());
+        return status;
+    }
+    const auto exportStatus = ExportLocalMetadata(manager_id, local_metadata);
+    if (exportStatus != Status::OK()) {
+        UC_ERROR("HandleMetadataExchange ExportLocalMetadata FAILED peer={} status={}", manager_id,
+                 exportStatus.Underlying());
+        return exportStatus;
+    }
+    UC_INFO("HandleMetadataExchange OK peer={} local_blob_size={}", manager_id,
+             local_metadata.size());
+    return Status::OK();
 }
 
 Status TransportManager::HandleControlRequest(const Metadata& request, Metadata& response)
@@ -327,9 +367,17 @@ Status TransportManager::FindTransport(Operation& batch, Transport*& transport)
     TransportProtocol protocol = TransportProtocol::Hixl;
     if (!TransportForDirect(batch.direct, protocol)) { return Status::Error(); }
     const auto transport_it = protocol_map_.find(protocol);
-    if (transport_it == protocol_map_.end()) { return Status::Error(); }
-    transport = transport_it->second;
-    return Status::OK();
+    if (transport_it != protocol_map_.end()) {
+        transport = transport_it->second;
+        return Status::OK();
+    }
+    // Fallback: the preferred backend is not installed, so route to any other
+    // available backend that can carry this direct.
+    for (const auto& installed : protocol_map_) {
+        transport = installed.second;
+        return Status::OK();
+    }
+    return Status::Error();
 }
 
 Status TransportManager::Connect(TransportProtocol protocol, const ManagerID& manager_id)

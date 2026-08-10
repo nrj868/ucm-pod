@@ -99,14 +99,19 @@ private:
 
     Status Compose()
     {
-#ifdef UC_DRAM_ASCEND_BACKEND
+#ifdef UC_DRAM_HAVE_TRANSPORT_BACKEND
         const auto transferTimeout = std::max(config->taskTimeouts.load, config->taskTimeouts.dump);
-        auto createdBackend = CreateTransportManagerBackend(TransportManagerBackendOptions{
+        TransportManagerBackendOptions backendOpts{
             config->localControlHost, config->localControlPort, config->localTransportManagerId,
             config->localHost, config->transportDeviceId, 1000,
             static_cast<std::int32_t>(std::min<std::int64_t>(
                 transferTimeout.count(), std::numeric_limits<std::int32_t>::max())),
-            config->nodeScheduler.nodes});
+            config->nodeScheduler.nodes};
+        if (config->transportProtocol == "ibverbs") {
+            backendOpts.protocol = TransportBackendProtocol::kIbverbs;
+            backendOpts.ibverbsDeviceName = config->ibverbsDeviceName;
+        }
+        auto createdBackend = CreateTransportManagerBackend(std::move(backendOpts));
         if (!createdBackend) { return createdBackend.Error(); }
         transportBackend = std::move(createdBackend).Value();
 
@@ -174,7 +179,23 @@ private:
         if (status.Failure()) { return status; }
         status = replyService->Start();
         if (status.Failure()) { return status; }
-        return nodeScheduler->Start();
+        status = nodeScheduler->Start();
+        if (status.Failure()) { return status; }
+
+        // Fail fast: eagerly establish each configured DramPool control +
+        // transport-manager connection so Setup surfaces an unreachable peer
+        // (bad endpoint / wrong port) instead of deferring the error to the
+        // first request. The per-actor lazy Connect is a no-op against an
+        // already-connected peer, so this does not race the scheduler threads.
+        for (const auto& node : config->nodeScheduler.nodes) {
+            const auto connectStatus = transportBackend->Connect(
+                Connect{node.nodeId, kDefaultLaneId, 0, node.transportManagerId});
+            if (connectStatus.Failure()) {
+                StopGraph();
+                return connectStatus;
+            }
+        }
+        return Status::OK();
 #else
         return Status::Unsupported();
 #endif
@@ -236,9 +257,15 @@ Expected<std::vector<std::uint8_t>> DramStore::Lookup(const Detail::BlockId* blo
     return taskManager->WaitLookup(std::move(submitted).Value());
 }
 
-Expected<ssize_t> DramStore::LookupOnPrefix(const Detail::BlockId*, std::size_t)
+Expected<ssize_t> DramStore::LookupOnPrefix(const Detail::BlockId* blocks, std::size_t num)
 {
-    return Status::Unsupported();
+    auto looked = Lookup(blocks, num);
+    if (!looked) { return looked.Error(); }
+    const auto& founds = looked.Value();
+    for (std::size_t i = 0; i < num; ++i) {
+        if (founds[i] == 0) { return static_cast<ssize_t>(i) - 1; }
+    }
+    return static_cast<ssize_t>(num) - 1;
 }
 
 void DramStore::Prefetch(const Detail::BlockId*, std::size_t) {}
@@ -293,10 +320,13 @@ Status DramStore::RegisterKVCaches(const KVCacheRegistration* registrations, std
         return Status::InvalidParam("too many KV cache registrations");
     }
 
+    const auto kvMemType = (config && config->kvCacheMemoryType == "host")
+                               ? MemoryRegionType::HOST
+                               : MemoryRegionType::DEVICE;
     for (std::size_t index = 0; index < count; ++index) {
         auto registered =
             transportBackend->RegisterMemory(reinterpret_cast<void*>(registrations[index].addr),
-                                             registrations[index].size, MemoryRegionType::DEVICE);
+                                             registrations[index].size, kvMemType);
         if (registered) {
             memoryHandles.push_back(std::move(registered).Value());
             continue;
@@ -313,7 +343,9 @@ Status DramStore::RegisterKVCaches(const KVCacheRegistration* registrations, std
         }
         return result;
     }
-    return Status::OK();
+    // KV caches are registered after the transport connected during Compose, so
+    // re-export local memory so peers pick up the newly registered regions.
+    return transportBackend->RefreshMemoryAdvertisement();
 }
 
 }  // namespace UC::Dram

@@ -22,6 +22,7 @@
  * SOFTWARE.
  * */
 #include "completion_poller.h"
+#include <cstring>
 #include <thread>
 #include <utility>
 #include "core/transport_manager.h"
@@ -251,6 +252,13 @@ void CompletionPoller::SettleDataTransfer(CompletionRecord& record,
                     }
                 }
             } else {
+                std::uint64_t key_id = 0;
+                std::memcpy(&key_id, item.key.data(), sizeof(key_id));
+                UC_DEBUG(
+                    "SettleDataTransfer DUMP not completed: terminal={} opcode={} peer={} "
+                    "handle={} idx={} key_id={:#x}",
+                    static_cast<int>(terminalStatus), static_cast<int>(record.opcode),
+                    record.peer_one_sided_id, record.data_handle, item.index_in_request, key_id);
                 const auto abortStatus = runtime_.metadata.Delete(item.key);
                 if (abortStatus.Failure()) {
                     UC_ERROR("CompletionPoller Delete reserved DUMP failed, handle={}, error={}",
@@ -264,6 +272,14 @@ void CompletionPoller::SettleDataTransfer(CompletionRecord& record,
                          releaseStatus);
             } else if (terminalStatus == transport::TransferStatus::Completed) {
                 result = DumpLoadResult::Ok;
+            } else {
+                std::uint64_t key_id = 0;
+                std::memcpy(&key_id, item.key.data(), sizeof(key_id));
+                UC_DEBUG(
+                    "SettleDataTransfer LOAD not completed: terminal={} peer={} handle={} "
+                    "idx={} key_id={:#x}",
+                    static_cast<int>(terminalStatus), record.peer_one_sided_id,
+                    record.data_handle, item.index_in_request, key_id);
             }
         }
 

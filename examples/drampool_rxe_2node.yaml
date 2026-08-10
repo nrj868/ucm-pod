@@ -1,0 +1,55 @@
+# DramPool runtime config for the two-node rxe bench.
+# Two drampool daemons run on the server node (node0, 192.168.100.11) on
+# distinct control/transport ports; the DramStore client runs on node1
+# (192.168.100.12) and is routed across both pools by the ring-hash router.
+# All three peers (drampool0, drampool1, client) are listed so each drampool's
+# twoSidedToOneSided map can validate the client's control peer.
+transport:
+  device_ids:
+    - 0
+  endpoints:
+    - two_sided: "192.168.100.11:9000"
+      one_sided: "192.168.100.11:4501"
+    - two_sided: "192.168.100.11:9001"
+      one_sided: "192.168.100.11:4503"
+    - two_sided: "192.168.100.12:4702"
+      one_sided: "192.168.100.12:4502"
+    - two_sided: "192.168.100.12:4703"
+      one_sided: "192.168.100.12:4503"
+
+health:
+  port: 0
+
+queue:
+  request_depth: 65536
+  completion_depth: 65536
+
+request_receiver:
+  idle_wait_us: 100
+
+poller:
+  pending_depth: 64
+
+flag_buffer:
+  capacity_mb: 8
+  slot_size_bytes: 64
+
+gc:
+  enabled: true
+  interval_ms: 1000
+
+metadata:
+  periodic_eviction_policy: TTL
+  deep_eviction_policy: POSITION
+  lease_time_ms: 5000
+  default_evict_ratio: 0.0
+  evict_period_ms: 31536000000
+
+operation:
+  timeout_ms: 5000
+
+logger:
+  level: info
+  dir: ./logs
+  max_files: 10
+  max_size_mb: 1

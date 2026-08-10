@@ -34,6 +34,7 @@ enum class Opcode {
 
 enum class TransportProtocol : uint32_t {
     Hixl = 0,
+    Ibverbs = 1,
 };
 
 enum class TransferStatus {

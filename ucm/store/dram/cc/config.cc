@@ -270,6 +270,16 @@ Expected<DramConfig> DramConfig::Parse(const Detail::Dictionary& dictionary)
         if (status.Failure()) { return status; }
         result.tensorSizes.assign(tensorSizes.begin(), tensorSizes.end());
 
+        if (dictionary.Contains("transport_protocol")) {
+            dictionary.Get("transport_protocol", result.transportProtocol);
+        }
+        if (dictionary.Contains("ibverbs_device_name")) {
+            dictionary.Get("ibverbs_device_name", result.ibverbsDeviceName);
+        }
+        if (dictionary.Contains("kv_cache_memory_type")) {
+            dictionary.Get("kv_cache_memory_type", result.kvCacheMemoryType);
+        }
+
         status = result.Validate();
         if (status.Failure()) { return status; }
         return result;

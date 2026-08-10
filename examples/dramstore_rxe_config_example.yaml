@@ -1,0 +1,113 @@
+# DramStore Configuration File Example
+#
+# DramStore is a P2P KV-cache *client*: it connects over one-sided RDMA
+# (soft-RoCE / rxe or hardware RoCE / ibverbs) to one or more drampool
+# daemons. The block IDs are ring-hash routed across the configured pools,
+# so dump/load/lookup spread across both nodes.
+#
+# DramStore is loaded as a leaf store through UcmPipelineStore's dlopen
+# mechanism (same as Cache/Posix/etc.): store_pipeline: "Dram" tells
+# UcmPipelineStore to Stack libdramstore.so, which exports MakeDramStore.
+#
+# Use this config file by pointing UCM at it:
+#   kv_connector_extra_config={"UCM_CONFIG_FILE": "/workspace/unified-cache-management/examples/dramstore_rxe_config_example.yaml"}
+#
+# The ucm_connector_config dict below is forwarded verbatim to the C++
+# DramStore::Setup; see ucm/store/dram/cc/config.cc for the full schema
+# and validation rules.
+
+ucm_connectors:
+  - ucm_connector_name: "UcmPipelineStore"
+    ucm_connector_config:
+      store_pipeline: "Dram"
+      # --- Local endpoints this DramStore client binds ---
+      # Two-sided (TCP control) port the client listens on for drampool
+      # disconnect notifications; the client's own transport-manager port
+      # drampool dials back to.
+      local_control_endpoint: "192.168.100.11:4702"
+      local_host: "192.168.100.11"
+      local_transport_manager_id: "192.168.100.11:4502"
+
+      # RDMA device index into the ibverbs device list (0 = first device,
+      # typically rxe0 on soft-RoCE setups or the first RNIC on hard RoCE).
+      transport_device_id: 0
+
+      # Router determines how block IDs map to node IDs. "ring_hash" uses
+      # 128 virtual nodes per peer with Crc32IEEE hashing. See
+      # ucm/store/dram/cc/router.h for alternatives.
+      router_type: "ring_hash"
+
+      # NOTE: tensor_size_list is NOT a YAML config field. The integration
+      # layer (vLLM / mindie) injects it at runtime from the model's
+      # kv_cache_layout (per-shard tensor sizes * blocks_per_chunk), the
+      # same way UcmPipelineStore receives it. See
+      # ucm/integration/vllm/ucm_connector.py:tensor_size_list assignment.
+
+      # Global admission cap on entries per dump/load/lookup batch. The
+      # per-node maxInflight is min(max_io_entries, kMaxInflightPerNode);
+      # reply slot count is nodeCount * maxInflight.
+      max_io_entries: 256
+
+      # --- Per-node endpoints (the drampool daemons this client talks to) ---
+      # node_ids, node_control_endpoints, node_transport_manager_ids are
+      # parallel arrays: node_ids[i] is the integer node id (used in wire
+      # headers and routing), node_control_endpoints[i] is drampool[i]'s
+      # two-sided TCP control port, node_transport_manager_ids[i] is its
+      # one-sided RDMA transport-manager endpoint.
+      node_ids: [1, 2]
+      node_control_endpoints:
+        - "192.168.100.11:9000"   # drampool on node0
+        - "192.168.100.12:9000"   # drampool on node1
+      node_transport_manager_ids:
+        - "192.168.100.11:4501"
+        - "192.168.100.12:4501"
+
+      # "ibverbs" for soft-RoCE (rxe) or hard RoCE. The matching device
+      # name (ibverbs_device_name) is what `ibv_devinfo` lists.
+      transport_protocol: "ibverbs"
+      ibverbs_device_name: "rxe0"
+
+      # Where the registered KV cache memory lives: "host" (CPU memory)
+      # or "device" (NPU/GPU memory). drampool's RDMA target is selected
+      # accordingly at RegisterKVCaches time.
+      kv_cache_memory_type: "host"
+
+      # --- Concurrency knobs (optional, user-tunable) ---
+      # Number of TransportExecutor worker threads that drive the IB verbs
+      # data path. Commands are hashed by node_id onto workers, so
+      # worker_count > 1 only helps when node_count > 1. Default 1
+      # (single-worker serialization); set to node_count for full per-node
+      # parallelism.
+      transport_worker_count: 1
+
+      # Number of NodeScheduler runner threads that drive the per-node
+      # actor state machines (event loop, retry, fence). Default
+      # min(4, node_count); the cap at 4 keeps the scheduler thread count
+      # bounded on large topologies while still parallelizing up to four
+      # nodes.
+      node_runner_count: 2
+
+      # --- Per-op timeouts (milliseconds) ---
+      # lookup returns ready-or-timeout; dump/load wait on remote RDMA
+      # Read completion. rxe soft-RoCE on a busy host occasionally stalls
+      # on first-touch QP setup, so 500ms+ for lookup and 2000ms for
+      # dump/load are safe defaults. Hard RoCE can run tighter.
+      lookup_timeout_ms: 500
+      dump_timeout_ms: 2000
+      load_timeout_ms: 2000
+
+      # Reconnect backoff (ms) when a drampool peer is observed down.
+      reconnect_interval_ms: 100
+
+# When you use UcmNfsStore, you should set enable_event_sync to false.
+# DramStore is event-driven via the local ReplyService poller, so the
+# global enable_event_sync flag is orthogonal and can stay true.
+enable_event_sync: true
+
+# Whether to use layerwise loading/saving (optional, default: True for
+# UCMConnector). DramStore supports both; set false for whole-layer dumps.
+use_layerwise: true
+
+# Minimum token threshold for KV persistence. Requests with fewer tokens
+# skip KV load and dump operations.
+persist_token_threshold: 0

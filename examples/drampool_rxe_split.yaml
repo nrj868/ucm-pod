@@ -1,0 +1,61 @@
+# DramPool runtime config for the split two-node rxe bench.
+# Topology: DramStore client lives on node0 alongside drampool0; drampool1
+# runs alone on node1. The DramStore ring-hash router spreads blocks across
+# both pools, so dump/load/lookup hit a local pool (node0) and a remote pool
+# (node1) over rxe in the same run.
+#
+# All four peers are listed so each drampool's twoSidedToOneSided map can
+# validate the DramStore client's two control peers (worker + scheduler).
+transport:
+  device_ids:
+    - 0
+  endpoints:
+    # drampool0 on node0 (local pool for the DramStore client).
+    - two_sided: "192.168.100.11:9000"
+      one_sided: "192.168.100.11:4501"
+    # drampool1 on node1 (remote pool).
+    - two_sided: "192.168.100.12:9000"
+      one_sided: "192.168.100.12:4501"
+    # DramStore worker on node0.
+    - two_sided: "192.168.100.11:4702"
+      one_sided: "192.168.100.11:4502"
+    # DramStore scheduler on node0.
+    - two_sided: "192.168.100.11:4703"
+      one_sided: "192.168.100.11:4503"
+
+health:
+  port: 0
+
+queue:
+  request_depth: 65536
+  completion_depth: 65536
+
+request_receiver:
+  idle_wait_us: 100
+
+poller:
+  pending_depth: 64
+
+flag_buffer:
+  capacity_mb: 8
+  slot_size_bytes: 64
+
+gc:
+  enabled: true
+  interval_ms: 1000
+
+metadata:
+  periodic_eviction_policy: TTL
+  deep_eviction_policy: POSITION
+  lease_time_ms: 5000
+  default_evict_ratio: 0.0
+  evict_period_ms: 31536000000
+
+operation:
+  timeout_ms: 5000
+
+logger:
+  level: info
+  dir: ./logs
+  max_files: 10
+  max_size_mb: 1

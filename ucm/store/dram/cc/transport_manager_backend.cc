@@ -27,6 +27,17 @@
 #include "logger/logger.h"
 
 namespace UC::Dram {
+namespace {
+
+// Maps the DramStore backend protocol selector to the p2p transport protocol
+// enum that InstallTransport/Connect/Disconnect consume.
+transport::TransportProtocol ToTransportProtocol(TransportBackendProtocol protocol)
+{
+    if (protocol == TransportBackendProtocol::kIbverbs) { return transport::TransportProtocol::Ibverbs; }
+    return transport::TransportProtocol::Hixl;
+}
+
+}  // namespace
 
 TransportManagerBackend::TransportManagerBackend(TransportManagerBackendOptions options)
     : options_(std::move(options)), manager_(options_.localTransportManagerId)
@@ -45,15 +56,32 @@ Status TransportManagerBackend::Init()
     }
     localControl_ = transport::Endpoint{options_.localControlHost, options_.localControlPort};
 
-    // TODO: make transport backend configurable
-    transport::HixlInitAttrs attrs;
-    attrs.ip = options_.localHost;
-    attrs.instances.push_back(transport::HixlInitAttrs::Instance{-1, options_.deviceId, {}});
-    attrs.connect_timeout_ms = options_.connectTimeoutMs;
-    attrs.transfer_timeout_ms = options_.transferTimeoutMs;
+    const auto protocol = ToTransportProtocol(options_.protocol);
+    std::unique_ptr<transport::InitAttrs> attrs;
+    if (options_.protocol == TransportBackendProtocol::kIbverbs) {
+        auto ibv = std::make_unique<transport::IbverbsInitAttrs>();
+        ibv->device_name = options_.ibverbsDeviceName;
+        ibv->port = options_.ibverbsPort;
+        ibv->gid_index = options_.ibverbsGidIndex;
+        ibv->send_wr_depth = options_.ibverbsSendWrDepth;
+        ibv->recv_wr_depth = options_.ibverbsRecvWrDepth;
+        ibv->sge_depth = options_.ibverbsSgeDepth;
+        ibv->cq_depth = options_.ibverbsCqDepth;
+        ibv->poll_interval_us = options_.ibverbsPollIntervalUs;
+        ibv->connect_timeout_ms = options_.connectTimeoutMs;
+        ibv->transfer_timeout_ms = options_.transferTimeoutMs;
+        attrs = std::move(ibv);
+    } else {
+        auto hixl = std::make_unique<transport::HixlInitAttrs>();
+        hixl->ip = options_.localHost;
+        hixl->instances.push_back(transport::HixlInitAttrs::Instance{-1, options_.deviceId, {}});
+        hixl->connect_timeout_ms = options_.connectTimeoutMs;
+        hixl->transfer_timeout_ms = options_.transferTimeoutMs;
+        attrs = std::move(hixl);
+    }
     auto transportStatus = manager_.Init();
     if (transportStatus.Failure()) { return transportStatus; }
-    transportStatus = manager_.InstallTransport(transport::TransportProtocol::Hixl, attrs);
+    transportStatus = manager_.InstallTransport(protocol, *attrs);
     if (transportStatus.Failure()) { return transportStatus; }
     transportStatus = control_.Init(localControl_);
     if (transportStatus.Failure()) { return transportStatus; }
@@ -109,7 +137,7 @@ Status TransportManagerBackend::Connect(const ::UC::Dram::Connect& command) noex
     try {
         auto status = manager_.ExchangeMetadata(command.transportManagerId);
         if (status.Failure()) { return status; }
-        status = manager_.Connect(transport::TransportProtocol::Hixl, command.transportManagerId);
+        status = manager_.Connect(ToTransportProtocol(options_.protocol), command.transportManagerId);
         return status;
     } catch (...) {
         return Status::Error("TransportManager connect threw an exception");
@@ -123,10 +151,23 @@ Status TransportManagerBackend::Fence(const ::UC::Dram::FenceEpoch& command) noe
     try {
         // The transport Manager contract guarantees that successful Disconnect
         // synchronously revokes old-connection access to local registered memory.
-        return manager_.Disconnect(transport::TransportProtocol::Hixl,
+        return manager_.Disconnect(ToTransportProtocol(options_.protocol),
                                    found->second.transportManagerId);
     } catch (...) {
         return Status::Error("TransportManager disconnect threw an exception");
+    }
+}
+
+Status TransportManagerBackend::RefreshMemoryAdvertisement() noexcept
+{
+    try {
+        for (const auto& node : nodes_) {
+            const auto status = manager_.ExchangeMetadata(node.second.transportManagerId);
+            if (status.Failure()) { return status; }
+        }
+        return Status::OK();
+    } catch (...) {
+        return Status::Error("TransportManager refresh metadata threw an exception");
     }
 }
 

@@ -22,6 +22,7 @@
 #include "task_worker.h"
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <thread>
 #include <utility>
 #include "core/transport_manager.h"
@@ -138,6 +139,12 @@ Status TaskWorker::ProcessDump(const KvDumpRequest& request,
         }
 
         // INITIALIZED entries are not eviction candidates while the DUMP is in flight.
+        std::uint64_t key_id = 0;
+        std::memcpy(&key_id, entry.key.data(), sizeof(key_id));
+        UC_DEBUG(
+            "ProcessDump[{}] key_id={:#x} idx={} len={} src_addr={:#x} dst_addr={:#x} dst_size={}",
+            index, key_id, entry.idx, entry.len, entry.addr,
+            reinterpret_cast<std::uintptr_t>(metadataEntry->buffer.addr), metadataEntry->size);
         transfer_items.emplace_back(TransferItem{index, entry.key});
         operation.ops.emplace_back(
             transport::Segment{metadataEntry->buffer.addr, entry.addr, entry.len});
@@ -208,6 +215,13 @@ Status TaskWorker::ProcessLoad(const KvLoadRequest& request,
         }
 
         // The LOAD pin keeps metadata and buffer alive through async transport.
+        std::uint64_t key_id = 0;
+        std::memcpy(&key_id, entry.key.data(), sizeof(key_id));
+        UC_DEBUG(
+            "ProcessLoad[{}] key_id={:#x} idx={} len={} src_addr={:#x} dst_addr={:#x} src_size={}",
+            index, key_id, entry.idx, entry.len,
+            reinterpret_cast<std::uintptr_t>(metadataEntry->buffer.addr), entry.addr,
+            metadataEntry->size);
         transfer_items.emplace_back(TransferItem{index, entry.key});
         operation.ops.emplace_back(
             transport::Segment{metadataEntry->buffer.addr, entry.addr, entry.len});

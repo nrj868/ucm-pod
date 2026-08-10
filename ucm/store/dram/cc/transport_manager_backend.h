@@ -37,6 +37,14 @@
 
 namespace UC::Dram {
 
+// Selects the one-sided transport the TransportManager backend installs.
+// kHixl targets the ACL/HIXL runtime (Ascend); kIbverbs targets the pure
+// libibverbs backend (Soft-RoCE/rxe on plain x86 hosts).
+enum class TransportBackendProtocol : std::uint8_t {
+    kHixl = 0,
+    kIbverbs,
+};
+
 struct TransportManagerBackendOptions {
     std::string localControlHost;
     std::uint16_t localControlPort{0};
@@ -46,6 +54,18 @@ struct TransportManagerBackendOptions {
     std::int32_t connectTimeoutMs{1000};
     std::int32_t transferTimeoutMs{5000};
     std::vector<NodeEndpoint> nodes;
+    TransportBackendProtocol protocol{TransportBackendProtocol::kHixl};
+
+    // Pure libibverbs backend parameters. Only consulted when protocol ==
+    // kIbverbs. Mirrors transport::IbverbsInitAttrs; defaults match that struct.
+    std::string ibverbsDeviceName;       // e.g. "rxe0"; empty -> first device
+    std::uint8_t ibverbsPort{1};
+    std::int32_t ibverbsGidIndex{-1};     // -1 auto-selects a RoCEv2 IPv4 GID
+    std::int32_t ibverbsSendWrDepth{256};
+    std::int32_t ibverbsRecvWrDepth{64};
+    std::int32_t ibverbsSgeDepth{4};
+    std::int32_t ibverbsCqDepth{1024};
+    std::int32_t ibverbsPollIntervalUs{50};
 };
 
 Expected<std::shared_ptr<ITransportBackend>> CreateTransportManagerBackend(
@@ -64,6 +84,7 @@ public:
     TransmitCompleted Transmit(const ::UC::Dram::Transmit& command) noexcept override;
     Status Connect(const ::UC::Dram::Connect& command) noexcept override;
     Status Fence(const ::UC::Dram::FenceEpoch& command) noexcept override;
+    Status RefreshMemoryAdvertisement() noexcept override;
     void Stop() override;
 
 private:

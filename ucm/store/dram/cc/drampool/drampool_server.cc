@@ -30,6 +30,7 @@
 #include <utility>
 #include "channels/tcp/tcp_message_channel.h"
 #include "core/transport_manager.h"
+#include "core/transport_init_attrs.h"
 #include "logger/logger.h"
 #include "metadata.h"
 #include "pool/buffer_pool.h"
@@ -244,27 +245,40 @@ Status DramPoolServer::StartTransportService()
     if (localEndpoint == g_config.twoSidedToOneSided.end()) {
         return Status::InvalidParam("local static transport endpoint is not configured");
     }
-    transport::HixlInitAttrs attrs;
-    // DramPool actively connects to DramStore. Client HIXL instances use a
-    // host-only engine ID and therefore do not open an HIXL listening port.
     transport::Endpoint managerEndpoint;
     if (auto status = ParseDramPoolEndpoint("transport local one_sided", localEndpoint->second,
                                             managerEndpoint);
         status.Failure()) {
         return status;
     }
-    attrs.ip = managerEndpoint.host;
-    attrs.role = transport::HixlRole::Client;
-    attrs.instances.reserve(g_config.transportDeviceIds.size());
-    for (const auto deviceId : g_config.transportDeviceIds) {
-        transport::HixlInitAttrs::Instance instance;
-        instance.port = -1;
-        instance.device_id = deviceId;
-        attrs.instances.push_back(std::move(instance));
+
+    Status status{Status::OK()};
+    if (g_config.transportProtocol == "ibverbs") {
+        // Soft-RoCE/rxe: single RC device, no role/instances concept.
+        transport::IbverbsInitAttrs ibv;
+        ibv.device_name = g_config.nics.empty() ? std::string{} : g_config.nics.front();
+        ibv.port = 1;
+        ibv.gid_index = -1;
+        ibv.connect_timeout_ms = static_cast<std::int32_t>(g_config.opTimeoutMs);
+        ibv.transfer_timeout_ms = static_cast<std::int32_t>(g_config.opTimeoutMs);
+        status = transportManager_->InstallTransport(transport::TransportProtocol::Ibverbs, ibv);
+    } else {
+        // DramPool actively connects to DramStore. Client HIXL instances use a
+        // host-only engine ID and therefore do not open an HIXL listening port.
+        transport::HixlInitAttrs attrs;
+        attrs.ip = managerEndpoint.host;
+        attrs.role = transport::HixlRole::Client;
+        attrs.instances.reserve(g_config.transportDeviceIds.size());
+        for (const auto deviceId : g_config.transportDeviceIds) {
+            transport::HixlInitAttrs::Instance instance;
+            instance.port = -1;
+            instance.device_id = deviceId;
+            attrs.instances.push_back(std::move(instance));
+        }
+        attrs.connect_timeout_ms = static_cast<std::int32_t>(g_config.opTimeoutMs);
+        attrs.transfer_timeout_ms = static_cast<std::int32_t>(g_config.opTimeoutMs);
+        status = transportManager_->InstallTransport(transport::TransportProtocol::Hixl, attrs);
     }
-    attrs.connect_timeout_ms = static_cast<std::int32_t>(g_config.opTimeoutMs);
-    attrs.transfer_timeout_ms = static_cast<std::int32_t>(g_config.opTimeoutMs);
-    auto status = transportManager_->InstallTransport(transport::TransportProtocol::Hixl, attrs);
     if (status.Failure()) { return status; }
     if (auto registerStatus = RegisterBufferPools(); registerStatus.Failure()) {
         return registerStatus;

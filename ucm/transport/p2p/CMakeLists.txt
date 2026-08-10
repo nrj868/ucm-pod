@@ -3,6 +3,8 @@ if(NOT (RUNTIME_ENVIRONMENT STREQUAL "ascend"
     return()
 endif()
 
+option(P2P_ENABLE_IBVERBS "Enable the libibverbs soft-RoCE (rxe) transport backend" OFF)
+
 if(NOT DEFINED ASCEND_ROOT)
     if(DEFINED ENV{ASCEND_HOME_PATH})
         set(ASCEND_ROOT "$ENV{ASCEND_HOME_PATH}" CACHE PATH "Path to Ascend root directory")
@@ -115,6 +117,29 @@ else()
     )
 endif()
 
+# --- libibverbs (soft-RoCE/rxe) backend --------------------------------------
+# Opt-in: links libibverbs so the backend builds on plain x86 hosts. Targets
+# the RC transport over a single device/port (e.g. Soft-RoCE/rxe0).
+set(P2P_IBVERBS_AVAILABLE OFF)
+if(P2P_ENABLE_IBVERBS)
+    find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
+    find_library(IBVERBS_LIBRARY NAMES ibverbs)
+    if(IBVERBS_INCLUDE_DIR AND IBVERBS_LIBRARY)
+        set(P2P_IBVERBS_AVAILABLE ON)
+    else()
+        message(WARNING
+            "P2P_ENABLE_IBVERBS=ON but libibverbs was not found "
+            "(infiniband/verbs.h / libibverbs); the ibverbs backend is disabled."
+        )
+    endif()
+endif()
+if(P2P_IBVERBS_AVAILABLE)
+    list(APPEND P2P_TRANSPORT_SOURCES
+        src/protocols/ibverbs/ibverbs_transport.cpp
+    )
+    message(STATUS "P2P ibverbs (soft-RoCE) transport backend is enabled")
+endif()
+
 add_library(ucm_p2p_transport SHARED ${P2P_TRANSPORT_SOURCES})
 target_include_directories(ucm_p2p_transport
     PUBLIC
@@ -123,6 +148,7 @@ target_include_directories(ucm_p2p_transport
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${UCM_ROOT_DIR}/ucm/shared/infra
+        ${UCM_ROOT_DIR}/ucm/shared/trans
 )
 target_compile_definitions(ucm_p2p_transport PRIVATE SPDLOG_FMT_EXTERNAL)
 target_link_libraries(ucm_p2p_transport
@@ -153,6 +179,11 @@ if(P2P_HIXL_AVAILABLE)
         ${P2P_HIXL_LIBRARY}
         ${P2P_METADEF_LIBRARY}
     )
+endif()
+if(P2P_IBVERBS_AVAILABLE)
+    target_compile_definitions(ucm_p2p_transport PRIVATE UCM_P2P_HAS_IBVERBS)
+    target_include_directories(ucm_p2p_transport PRIVATE ${IBVERBS_INCLUDE_DIR})
+    target_link_libraries(ucm_p2p_transport PRIVATE ${IBVERBS_LIBRARY})
 endif()
 set_target_properties(ucm_p2p_transport PROPERTIES
     INSTALL_RPATH "$ORIGIN"

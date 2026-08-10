@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <string>
@@ -178,7 +179,8 @@ Status CalculatePoolSlotCounts(DramPoolConfig& config)
     std::uint64_t totalProportion = 0;
     for (const auto proportion : config.poolBlockProportions) { totalProportion += proportion; }
 
-    const auto totalBytes = config.poolSizeGb * kBytesPerGiB;
+    const auto totalBytes = config.poolSizeMb != 0 ? config.poolSizeMb * kBytesPerMiB
+                                                    : config.poolSizeGb * kBytesPerGiB;
     std::vector<std::uint32_t> slotCounts;
     slotCounts.reserve(config.poolBlockSizes.size());
     const auto wholeShare = totalBytes / totalProportion;
@@ -243,7 +245,9 @@ std::string BuildUsage(const char* program)
            ".\n"
            "  --kvcache-block-proportions <P>... Relative capacity per block size; defaults to "
            "1:1.\n"
-           "  --ttl-minutes <MINUTES>            Absolute block lifetime; defaults to 120.\n";
+           "  --ttl-minutes <MINUTES>            Absolute block lifetime; defaults to 120.\n"
+           "  --transport-protocol <NAME>        One-sided transport: hixl (default) or ibverbs (soft-RoCE/rxe).\n"
+           "  --pool-size-mb <SIZE>              Pool size in MiB (overrides --pool-size-gb; for memlock-bounded rxe runs).\n";
 }
 
 Status ParseCommandLine(int argc, char** argv, DramPoolConfig& config)
@@ -253,10 +257,12 @@ Status ParseCommandLine(int argc, char** argv, DramPoolConfig& config)
     bool hasAddr = false;
     bool hasNics = false;
     bool hasPoolSize = false;
+    bool hasPoolSizeMb = false;
     bool hasBlockSizes = false;
     bool hasBlockProportions = false;
     bool hasTtl = false;
     bool hasConfig = false;
+    bool hasTransportProtocol = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index] == nullptr ? "" : argv[index];
@@ -282,6 +288,21 @@ Status ParseCommandLine(int argc, char** argv, DramPoolConfig& config)
             }
             config.runtimeConfigPath = std::move(value);
             hasConfig = true;
+            continue;
+        }
+        if (option == "--transport-protocol") {
+            if (hasTransportProtocol) {
+                return Status::InvalidParam("--transport-protocol may be specified once");
+            }
+            status = ReadSingleValue(option, hasInlineValue, inlineValue, argc, argv, index, value);
+            if (status.Failure()) { return status; }
+            config.transportProtocol = value;
+            std::transform(config.transportProtocol.begin(), config.transportProtocol.end(),
+                           config.transportProtocol.begin(), ::tolower);
+            if (config.transportProtocol != "hixl" && config.transportProtocol != "ibverbs") {
+                return Status::InvalidParam("--transport-protocol must be hixl or ibverbs");
+            }
+            hasTransportProtocol = true;
             continue;
         }
         if (option == "--addr") {
@@ -317,6 +338,19 @@ Status ParseCommandLine(int argc, char** argv, DramPoolConfig& config)
             status = ValidatePoolSize(config.poolSizeGb);
             if (status.Failure()) { return status; }
             hasPoolSize = true;
+            continue;
+        }
+        if (option == "--pool-size-mb") {
+            if (hasPoolSizeMb) { return Status::InvalidParam("--pool-size-mb may be specified once"); }
+            status = ReadSingleValue(option, hasInlineValue, inlineValue, argc, argv, index, value);
+            if (status.Failure()) { return status; }
+            if (Dram::ParseUint64(value, config.poolSizeMb).Failure()) {
+                return Status::InvalidParam("invalid {} value: {}", option, value);
+            }
+            if (config.poolSizeMb == 0) {
+                return Status::InvalidParam("--pool-size-mb must be greater than zero");
+            }
+            hasPoolSizeMb = true;
             continue;
         }
         if (option == "--kvcache-block-sizes") {
@@ -364,9 +398,9 @@ Status ParseCommandLine(int argc, char** argv, DramPoolConfig& config)
         return Status::InvalidParam("unknown argument: {}", argument);
     }
 
-    if (!hasAddr || !hasNics || !hasPoolSize || !hasBlockSizes) {
+    if (!hasAddr || !hasNics || (!hasPoolSize && !hasPoolSizeMb) || !hasBlockSizes) {
         return Status::InvalidParam(
-            "--addr, --nics, --pool-size-gb, and --kvcache-block-sizes are required");
+            "--addr, --nics, (--pool-size-gb|--pool-size-mb), and --kvcache-block-sizes are required");
     }
     if (!hasBlockProportions) {
         // Each configured block size receives an equal capacity share by default.

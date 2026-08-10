@@ -9,13 +9,15 @@ set(UCM_DRAM_STORE_CC_SOURCE_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/cc/node_scheduler.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/cc/task_manager.cc
 )
-if(RUNTIME_ENVIRONMENT STREQUAL "ascend")
+if(RUNTIME_ENVIRONMENT STREQUAL "ascend" OR P2P_ENABLE_IBVERBS)
     list(APPEND UCM_DRAM_STORE_CC_SOURCE_FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/cc/transport_manager_backend.cc)
 endif()
 add_library(dramstore SHARED ${UCM_DRAM_STORE_CC_SOURCE_FILES})
+if(RUNTIME_ENVIRONMENT STREQUAL "ascend" OR P2P_ENABLE_IBVERBS)
+    target_compile_definitions(dramstore PRIVATE UC_DRAM_HAVE_TRANSPORT_BACKEND)
+endif()
 if(RUNTIME_ENVIRONMENT STREQUAL "ascend")
-    target_compile_definitions(dramstore PRIVATE UC_DRAM_ASCEND_BACKEND)
     # aclrtSynchronizeEvent in dram_store.cc needs acl/acl.h + libascendcl.
     set(ASCEND_ROOT "/usr/local/Ascend/ascend-toolkit/latest" CACHE PATH
         "Path to Ascend root directory")
@@ -32,7 +34,7 @@ target_include_directories(dramstore PUBLIC
 target_include_directories(dramstore PUBLIC ${CMAKE_SOURCE_DIR}/ucm/shared)
 
 target_link_libraries(dramstore PUBLIC storeintf infra_logger infra_thread kv_common buffer_pool)
-if(RUNTIME_ENVIRONMENT STREQUAL "ascend")
+if(RUNTIME_ENVIRONMENT STREQUAL "ascend" OR P2P_ENABLE_IBVERBS)
     target_link_libraries(dramstore PUBLIC ucm_p2p_transport)
 endif()
 file(RELATIVE_PATH INSTALL_REL_PATH ${UCM_ROOT_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
@@ -69,4 +71,16 @@ if(BUILD_UCM_DRAMPOOL)
     add_executable(drampool ${DRAMPOOL_SOURCE_DIR}/main.cc)
     target_link_libraries(drampool PRIVATE drampool_core)
     install(TARGETS drampool RUNTIME DESTINATION bin COMPONENT ucm)
+endif()
+
+option(BUILD_DRAM_IBVERBS_E2E "Build the DramStore ibverbs (soft-RoCE) end-to-end binary" OFF)
+if(BUILD_DRAM_IBVERBS_E2E AND P2P_ENABLE_IBVERBS)
+    add_executable(dramstore_ibverbs_e2e cc/ibverbs_dramstore_e2e.cpp)
+    target_link_libraries(dramstore_ibverbs_e2e
+        PRIVATE
+            dramstore
+            ucm_p2p_transport
+            pthread
+    )
+    install(TARGETS dramstore_ibverbs_e2e RUNTIME DESTINATION bin COMPONENT ucm)
 endif()

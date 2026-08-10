@@ -49,6 +49,13 @@ struct DramConfig {
     std::size_t replySlotCount{0};
     std::uint32_t replySlotSize{0};
     std::vector<std::uint64_t> tensorSizes;
+    // One-sided transport: "hixl" (Ascend, default) or "ibverbs" (soft-RoCE/rxe).
+    std::string transportProtocol{"hixl"};
+    // libibverbs device name (e.g. "rxe0"); only consulted for "ibverbs".
+    std::string ibverbsDeviceName;
+    // KV-cache memory kind registered with the transport: "device" (default,
+    // NPU/GPU) or "host" (for soft-RoCE runs without a device).
+    std::string kvCacheMemoryType{"device"};
 
     static Expected<DramConfig> Parse(const Detail::Dictionary& dictionary);
     Status Validate() const;

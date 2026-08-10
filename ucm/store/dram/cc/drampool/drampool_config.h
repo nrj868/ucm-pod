@@ -50,6 +50,9 @@ struct DramPoolConfig {
     std::vector<std::string> nics{};
     // --pool-size-gb follows the project convention: the unit is GiB.
     std::uint64_t poolSizeGb{0};
+    // Optional small-pool override (MiB) for soft-RoCE runs bounded by memlock.
+    // When non-zero, takes precedence over poolSizeGb.
+    std::uint64_t poolSizeMb{0};
     std::vector<std::uint64_t> poolBlockSizes{};
     std::vector<std::uint32_t> poolBlockProportions{};
     // Resolved by ParseCommandLine from poolSizeGb, block sizes, and proportions.
@@ -58,6 +61,8 @@ struct DramPoolConfig {
 
     // Transport internals are loaded from the runtime YAML file.
     std::vector<std::int32_t> transportDeviceIds{0};
+    // One-sided transport: "hixl" (Ascend, default) or "ibverbs" (soft-RoCE/rxe).
+    std::string transportProtocol{"hixl"};
     // Cluster-wide routing from the request channel address to the transport identity.
     std::unordered_map<std::string, transport::ManagerID> twoSidedToOneSided{};
 
