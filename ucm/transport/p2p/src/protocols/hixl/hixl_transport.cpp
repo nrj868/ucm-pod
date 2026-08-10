@@ -1,5 +1,6 @@
 #include "protocols/hixl/hixl_transport.h"
 #include <arpa/inet.h>
+#include <chrono>
 #include <limits>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -279,12 +280,26 @@ Status HixlTransport::ImportMetadata(const ManagerID& manager_id, const Metadata
     {
         std::unique_lock<std::shared_mutex> peer_lock(peers_mutex_);
         const auto peer_it = peers_.find(manager_id);
+        bool preserve_connected = false;
         if (peer_it != peers_.end()) {
-            // A second metadata exchange means the previous remote instance has stopped, even
-            // when the new instance uses the same endpoint and device identifiers.
-            if (peer_it->second.connected &&
-                DisconnectRoute(peer_it->second, true) != Status::OK()) {
-                UC_ERROR("[Transport][HIXL] cleanup stale route failed: peer={}", manager_id);
+            const auto& old = peer_it->second;
+            // A re-export from the same live peer (e.g. registering more memory after connect)
+            // is not a restart: when the remote identity (role + first engine endpoint + device)
+            // is unchanged, keep the native HIXL connection and the connected flag instead of
+            // tearing the route down — otherwise mid-Stack re-exports churn connected=false and
+            // in-flight operations see an unusable peer.
+            const bool same_identity =
+                old.connected && !old.instances.empty() && !remote_instances.empty() &&
+                old.role == remote_role &&
+                old.instances.front().endpoint.host == remote_instances.front().endpoint.host &&
+                old.instances.front().endpoint.port == remote_instances.front().endpoint.port &&
+                old.instances.front().device_id == remote_instances.front().device_id;
+            if (old.connected) {
+                if (same_identity) {
+                    preserve_connected = true;
+                } else if (DisconnectRoute(old, true) != Status::OK()) {
+                    UC_ERROR("[Transport][HIXL] cleanup stale route failed: peer={}", manager_id);
+                }
             }
             peers_.erase(peer_it);
         }
@@ -300,6 +315,7 @@ Status HixlTransport::ImportMetadata(const ManagerID& manager_id, const Metadata
         }
         const auto route_status = BuildRouteLocked(manager_id, peer_state);
         if (route_status != Status::OK()) { return route_status; }
+        if (preserve_connected) { peer_state.connected = true; }  // BuildRouteLocked resets it
 
         peers_[manager_id] = std::move(peer_state);
     }
@@ -409,11 +425,13 @@ Status HixlTransport::Disconnect(const ManagerID& manager_id)
     return status;
 }
 
-Status HixlTransport::ValidateTransferLocked(const Operation& batch, size_t instance_index) const
+Status HixlTransport::ValidateTransferLocked(const Operation& batch, size_t instance_index,
+                                             bool* uses_host_memory) const
 {
     if (batch.target_manager.empty() || batch.ops.empty() || instance_index >= instances_.size()) {
         return Status::InvalidParam();
     }
+    if (uses_host_memory != nullptr) { *uses_host_memory = false; }
     for (const auto& item : batch.ops) {
         if (item.local_addr == nullptr || item.length == 0 || item.remote_addr == 0) {
             return Status::InvalidParam();
@@ -431,6 +449,10 @@ Status HixlTransport::ValidateTransferLocked(const Operation& batch, size_t inst
                 memory.second->native_handles.find(instance_index) !=
                     memory.second->native_handles.end()) {
                 registered = true;
+                if (uses_host_memory != nullptr &&
+                    memory.second->region.type == MemoryType::Host) {
+                    *uses_host_memory = true;
+                }
                 break;
             }
         }
@@ -450,8 +472,8 @@ Status HixlTransport::ExecuteSync(const Operation& batch)
     std::string remote_engine;
     {
         std::shared_lock<std::shared_mutex> peer_lock(peers_mutex_);
-        const auto peer_it = peers_.find(batch.target_manager);
-        if (peer_it == peers_.end()) { return Status::Error(); }
+    const auto peer_it = peers_.find(batch.target_manager);
+    if (peer_it == peers_.end()) { return Status::Error(); }
         const auto& peer_state = peer_it->second;
         if (peer_state.local_index >= instances_.size() || peer_state.instances.empty() ||
             !peer_state.connected) {
@@ -483,8 +505,8 @@ Status HixlTransport::ExecuteAsync(const Operation& batch, TransferHandle& handl
     std::string remote_engine;
     {
         std::shared_lock<std::shared_mutex> peer_lock(peers_mutex_);
-        const auto peer_it = peers_.find(batch.target_manager);
-        if (peer_it == peers_.end()) { return Status::Error(); }
+    const auto peer_it = peers_.find(batch.target_manager);
+    if (peer_it == peers_.end()) { return Status::Error(); }
         const auto& peer_state = peer_it->second;
         if (peer_state.local_index >= instances_.size() || peer_state.instances.empty() ||
             !peer_state.connected) {
@@ -494,10 +516,29 @@ Status HixlTransport::ExecuteAsync(const Operation& batch, TransferHandle& handl
         remote_engine = peer_state.instances.front().endpoint.ToString();
     }
 
+    bool uses_host_memory = false;
     {
         std::shared_lock<std::shared_mutex> memory_lock(memories_mutex_);
-        const auto transfer_status = ValidateTransferLocked(batch, local_index);
+        const auto transfer_status =
+            ValidateTransferLocked(batch, local_index, &uses_host_memory);
         if (transfer_status != Status::OK()) { return transfer_status; }
+    }
+
+    // Ascend A2 with HIXL 8.5.1 cannot execute Host-memory transfers through
+    // the native async path. Queue the working synchronous API on the instance
+    // worker while preserving the upper-layer async handle and polling lifecycle.
+    if (uses_host_memory) {
+        std::shared_future<Status> queued_sync;
+        const auto status = instances_[local_index]->QueueTransferSync(
+            remote_engine, batch.opcode, batch.ops, transfer_timeout_ms_, queued_sync);
+        if (status != Status::OK()) { return status; }
+
+        std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+        handle = next_transfer_handle_++;
+        if (handle == kInvalidTransferHandle) { handle = next_transfer_handle_++; }
+        pending_transfers_.emplace(
+            handle, PendingTransfer{local_index, nullptr, std::move(queued_sync)});
+        return Status::OK();
     }
 
     hixl::TransferReq request = nullptr;
@@ -509,7 +550,7 @@ Status HixlTransport::ExecuteAsync(const Operation& batch, TransferHandle& handl
         std::lock_guard<std::mutex> pending_lock(pending_mutex_);
         handle = next_transfer_handle_++;
         if (handle == kInvalidTransferHandle) { handle = next_transfer_handle_++; }
-        pending_transfers_.emplace(handle, PendingTransfer{local_index, request});
+        pending_transfers_.emplace(handle, PendingTransfer{local_index, request, {}});
     }
     return Status::OK();
 }
@@ -527,6 +568,23 @@ Status HixlTransport::GetStatus(TransferHandle handle, TransferStatus& status)
             return Status::Error();
         }
         pending = it->second;
+    }
+
+    if (pending.queued_sync.valid()) {
+        if (pending.queued_sync.wait_for(std::chrono::seconds(0)) !=
+            std::future_status::ready) {
+            status = TransferStatus::Waiting;
+            return Status::OK();
+        }
+        try {
+            status = pending.queued_sync.get() == Status::OK() ? TransferStatus::Completed
+                                                               : TransferStatus::Failed;
+        } catch (...) {
+            status = TransferStatus::Failed;
+        }
+        std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+        pending_transfers_.erase(handle);
+        return Status::OK();
     }
 
     TransferStatus transfer_status = TransferStatus::Waiting;

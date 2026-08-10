@@ -58,6 +58,46 @@ import time
 
 import numpy as np
 
+# --- ACL runtime helpers for NPU device-memory KV buffers ---------------------
+# hixl one-sided RDMA targets NPU device memory (the production KV cache lives
+# on the NPU). The bench therefore allocates src/dst KV buffers with aclrtMalloc
+# and copies data via aclrtMemcpy. aclInit + aclrtSetDevice(transportDeviceId)
+# are already done by the DramStore Stack path (dram_store.cc Compose), so by the
+# time these helpers run the caller thread already has device 0 set.
+_ACL_MEM_MALLOC_NORMAL = 2
+_ACL_MEMCPY_HOST_TO_DEVICE = 1
+_ACL_MEMCPY_DEVICE_TO_HOST = 2
+_ACL = None
+
+
+def _acl():
+    global _ACL
+    if _ACL is None:
+        lib = ctypes.CDLL("libascendcl.so")
+        lib.aclrtMalloc.restype = ctypes.c_int32
+        lib.aclrtMalloc.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_int]
+        lib.aclrtFree.restype = ctypes.c_int32
+        lib.aclrtFree.argtypes = [ctypes.c_void_p]
+        lib.aclrtMemcpy.restype = ctypes.c_int32
+        lib.aclrtMemcpy.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p,
+                                    ctypes.c_size_t, ctypes.c_int]
+        lib.aclrtMemset.restype = ctypes.c_int32
+        lib.aclrtMemset.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int32, ctypes.c_size_t]
+        _ACL = lib
+    return _ACL
+
+
+def _check_acl(ret, what):
+    if ret != 0:
+        raise RuntimeError(f"{what} failed: aclError={ret}")
+
+
+def device_to_bytes(ptr, size):
+    buf = (ctypes.c_char * size)()
+    _check_acl(_acl().aclrtMemcpy(buf, size, ctypes.c_void_p(ptr), size, _ACL_MEMCPY_DEVICE_TO_HOST),
+               "aclrtMemcpy D2H")
+    return buf.raw
+
 
 def load_ucmpipelinestore(so_dir):
     """Load the ucmpipelinestore pybind .so by path, avoiding the ucm package init."""
@@ -124,7 +164,7 @@ class BareDramStore:
 
 def cmp_and_print_diff(dst_ptrs_sizes, expected_bytes):
     for r, ((ptr, size), want) in enumerate(zip(dst_ptrs_sizes, expected_bytes)):
-        got = ctypes.string_at(ptr, size)
+        got = device_to_bytes(ptr, size)
         if got != want:
             for c, (xa, xb) in enumerate(zip(got, want)):
                 if xa != xb:
@@ -165,9 +205,9 @@ def make_dram_config(args, role: str) -> dict:
 
 class Region:
     """A KV buffer region: `ptr` is a usable local pointer (fill/verify); `addr`
-    is the value passed as the Operation's remote_addr. For host memory these
-    are the same (the host pointer)."""
-    __slots__ = ("ptr", "size", "addr", "_keep")
+    is the value passed as the Operation's remote_addr. For NPU device memory
+    these are the same (the device pointer returned by aclrtMalloc)."""
+    __slots__ = ("ptr", "size", "addr")
 
     def __init__(self, ptr, size, addr):
         self.ptr = ptr
@@ -175,26 +215,31 @@ class Region:
         self.addr = addr
 
 
-def build_host_regions(tensor_size, shards, request_size):
-    """Host-memory model: ctypes buffers; ptr == addr == the host pointer.
-    The buffers are kept alive (returned alongside via Region closure) so their
-    addresses remain valid for the bench lifetime."""
+def build_device_regions(tensor_size, shards, request_size):
+    """NPU device-memory model: aclrtMalloc'd buffers; ptr == addr == the device
+    pointer. Only the integer device addresses are held in Region; the ACL
+    runtime reclaims them on process exit."""
     regions = []
     for _ in range(request_size * shards):
-        b = ctypes.create_string_buffer(tensor_size)
-        regions.append(Region(ctypes.addressof(b), ctypes.sizeof(b), ctypes.addressof(b)))
-        regions[-1]._keep = b  # prevent GC of the ctypes buffer
+        ptr = ctypes.c_void_p()
+        _check_acl(_acl().aclrtMalloc(ctypes.byref(ptr), tensor_size, _ACL_MEM_MALLOC_NORMAL),
+                   "aclrtMalloc")
+        regions.append(Region(ptr.value, tensor_size, ptr.value))
     return regions
 
 
 def fill_random(regions):
     for r in regions:
-        ctypes.memmove(r.ptr, secrets.token_bytes(r.size), r.size)
+        data = secrets.token_bytes(r.size)
+        host = ctypes.create_string_buffer(data, r.size)
+        _check_acl(_acl().aclrtMemcpy(ctypes.c_void_p(r.ptr), r.size, host, r.size,
+                                      _ACL_MEMCPY_HOST_TO_DEVICE), "aclrtMemcpy H2D fill")
 
 
 def zero(regions):
     for r in regions:
-        ctypes.memset(r.ptr, 0, r.size)
+        _check_acl(_acl().aclrtMemset(ctypes.c_void_p(r.ptr), r.size, 0, r.size),
+                   "aclrtMemset zero")
 
 
 def region_addrs(regions, shards):
@@ -214,7 +259,7 @@ def e2e_test(worker, scheduler, src_regs, dst_regs, args):
 
     fill_random(src_regs)
     zero(dst_regs)
-    expected = [ctypes.string_at(r.ptr, r.size) for r in src_regs]
+    expected = [device_to_bytes(r.ptr, r.size) for r in src_regs]
     print(f"[debug] src[0][:4]={[b for b in expected[0][:4]]} ptr={hex(src_regs[0].ptr)} addr={hex(src_regs[0].addr)}", file=sys.stderr)
 
     t0 = time.perf_counter()
@@ -231,7 +276,7 @@ def e2e_test(worker, scheduler, src_regs, dst_regs, args):
     load_dt = time.perf_counter() - t0
 
     dst_flat = [(r.ptr, r.size) for r in dst_regs]
-    print(f"[debug] dst first bytes: {[ctypes.string_at(r.ptr, 1)[0] for r in dst_regs[:8]]}", file=sys.stderr)
+    print(f"[debug] dst first bytes: {[device_to_bytes(r.ptr, 1)[0] for r in dst_regs[:8]]}", file=sys.stderr)
     cmp_and_print_diff(dst_flat, expected)
 
     per_block = args.tensor_size * args.layer_size * args.chunk_size
@@ -271,13 +316,13 @@ def main():
 
     ucmdramstore = load_ucmdramstore(args.so_dir)
     worker = BareDramStore(make_dram_config(args, "worker"), ucmdramstore)
-    scheduler = BareDramStore(make_dram_config(args, "scheduler"), ucmdramstore)
+    scheduler = worker  # single-peer: worker does lookup+dump+load, one hixl engine
 
     shards = args.layer_size * args.chunk_size
     count = args.request_size * shards
-    # Host memory: ctypes buffers; ptr == addr == host pointer.
-    src_regs = build_host_regions(args.tensor_size, shards, args.request_size)
-    dst_regs = build_host_regions(args.tensor_size, shards, args.request_size)
+    # NPU device memory: aclrtMalloc'd buffers; ptr == addr == device pointer.
+    src_regs = build_device_regions(args.tensor_size, shards, args.request_size)
+    dst_regs = build_device_regions(args.tensor_size, shards, args.request_size)
     if worker.need_register_kv_caches():
         worker.register_kv_caches([(r.ptr, r.size) for r in src_regs + dst_regs])
     print(f"[debug] registered {len(src_regs) + len(dst_regs)} regions", file=sys.stderr)
@@ -288,6 +333,7 @@ def main():
           f"batches={args.batch_number} (warmup={args.warmup_batches})")
 
     dump_times, load_times, data_bytes = [], [], 0
+    time.sleep(5)  # let hixl re-exchange/re-connect churn settle
     for i in range(args.batch_number + args.warmup_batches):
         dt, lt, db = e2e_test(worker, scheduler, src_regs, dst_regs, args)
         if i < args.warmup_batches:

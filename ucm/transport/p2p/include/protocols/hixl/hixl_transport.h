@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -59,9 +60,11 @@ private:
     struct PendingTransfer {
         size_t instance_index = SIZE_MAX;
         hixl::TransferReq request = nullptr;
+        std::shared_future<Status> queued_sync;
     };
 
-    Status ValidateTransferLocked(const Operation& batch, size_t instance_index) const;
+    Status ValidateTransferLocked(const Operation& batch, size_t instance_index,
+                                  bool* uses_host_memory = nullptr) const;
     Status BuildRouteLocked(const ManagerID& manager_id, Peer& peer);
     Status DisconnectRoute(const Peer& peer, bool ignore_failure);
 

@@ -199,3 +199,21 @@ install(DIRECTORY include/
     COMPONENT ucm
     FILES_MATCHING PATTERN "*.h"
 )
+
+# --- hixl_e2e reference two-process test (server+client over real NPU) -----
+# Builds only when the hixl backend is available. Run as two processes:
+#   HIXL_TEST_DEVICE_A=0 HIXL_TEST_DEVICE_B=1 hixl_e2e server &  ... client
+if(P2P_HIXL_AVAILABLE)
+    add_executable(hixl_e2e tests/e2e/hixl_e2e.cpp)
+    target_include_directories(hixl_e2e PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e
+        ${ASCEND_ROOT}/include
+        ${ASCEND_ROOT}/aarch64-linux/include
+        ${ASCEND_ROOT}/arm64-linux/include
+        ${P2P_HIXL_INCLUDE_DIR})
+    target_link_directories(hixl_e2e PRIVATE
+        ${ASCEND_ROOT}/lib64
+        ${ASCEND_ROOT}/aarch64-linux/lib64
+        ${ASCEND_ROOT}/arm64-linux/lib64)
+    target_link_libraries(hixl_e2e PRIVATE ucm_p2p_transport ascendcl pthread)
+endif()

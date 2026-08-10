@@ -100,6 +100,22 @@ private:
     Status Compose()
     {
 #ifdef UC_DRAM_HAVE_TRANSPORT_BACKEND
+#ifdef UC_DRAM_ASCEND_BACKEND
+        // The hixl transport sets the ACL device only on its worker thread; the
+        // ReplyService host buffers (aclrtMallocHost) are allocated here on the
+        // caller thread, so initialize the ACL runtime + set the device on this
+        // thread too. Mirrors DramPoolServer::InitializeDeviceRuntime.
+        {
+            const auto initRet = aclInit(nullptr);
+            if (initRet != ACL_SUCCESS && initRet != ACL_ERROR_REPEAT_INITIALIZE) {
+                return Status::Error("aclInit failed: " + std::to_string(initRet));
+            }
+            const auto setRet = aclrtSetDevice(config->transportDeviceId);
+            if (setRet != ACL_SUCCESS) {
+                return Status::Error("aclrtSetDevice failed: " + std::to_string(setRet));
+            }
+        }
+#endif
         const auto transferTimeout = std::max(config->taskTimeouts.load, config->taskTimeouts.dump);
         TransportManagerBackendOptions backendOpts{
             config->localControlHost, config->localControlPort, config->localTransportManagerId,
@@ -182,19 +198,8 @@ private:
         status = nodeScheduler->Start();
         if (status.Failure()) { return status; }
 
-        // Fail fast: eagerly establish each configured DramPool control +
-        // transport-manager connection so Setup surfaces an unreachable peer
-        // (bad endpoint / wrong port) instead of deferring the error to the
-        // first request. The per-actor lazy Connect is a no-op against an
-        // already-connected peer, so this does not race the scheduler threads.
-        for (const auto& node : config->nodeScheduler.nodes) {
-            const auto connectStatus = transportBackend->Connect(
-                Connect{node.nodeId, kDefaultLaneId, 0, node.transportManagerId});
-            if (connectStatus.Failure()) {
-                StopGraph();
-                return connectStatus;
-            }
-        }
+        // Connections are established lazily by the per-actor NodeScheduler
+        // (TryConnect on the first request) instead of eagerly during Setup.
         return Status::OK();
 #else
         return Status::Unsupported();
