@@ -18,7 +18,9 @@ if(RUNTIME_ENVIRONMENT STREQUAL "ascend" OR P2P_ENABLE_IBVERBS)
     target_compile_definitions(dramstore PRIVATE UC_DRAM_HAVE_TRANSPORT_BACKEND)
 endif()
 if(RUNTIME_ENVIRONMENT STREQUAL "ascend")
-    # aclrtSynchronizeEvent in dram_store.cc needs acl/acl.h + libascendcl.
+    # aclrtSynchronizeEvent / aclrtSetDevice in dram_store.cc need acl/acl.h +
+    # libascendcl; activate the ACL code paths guarded by UC_DRAM_ASCEND_BACKEND.
+    target_compile_definitions(dramstore PRIVATE UC_DRAM_ASCEND_BACKEND)
     set(ASCEND_ROOT "/usr/local/Ascend/ascend-toolkit/latest" CACHE PATH
         "Path to Ascend root directory")
     add_library(Ascend::ascendcl UNKNOWN IMPORTED)
