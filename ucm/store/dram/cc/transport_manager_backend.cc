@@ -115,6 +115,7 @@ Status TransportManagerBackend::UnregisterMemory(MemoryHandle handle)
 
 TransmitCompleted TransportManagerBackend::Transmit(const ::UC::Dram::Transmit& command) noexcept
 {
+    UC_DEBUG("[trace] TMB::Transmit enter");
     const auto found = nodes_.find(command.token.nodeId);
     if (found == nodes_.end() || command.payload.empty()) {
         return TransmitCompleted{command.token, Status::InvalidParam("invalid transmit")};

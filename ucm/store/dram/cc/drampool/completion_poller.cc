@@ -186,6 +186,7 @@ bool CompletionPoller::SubmitResponse(CompletionRecord& record)
         transport::Segment{record.local_resp_slot.local_addr, record.remote_resp_addr, len});
 
     TransportHandle handle = transport::kInvalidTransferHandle;
+    UC_DEBUG("[trace] DP::SubmitResponse ExecuteAsync enter, opcode={}", static_cast<int>(record.opcode));
     const auto submitStatus = runtime_.transport.ExecuteAsync(operation, handle);
     if (submitStatus.Failure() || handle == transport::kInvalidTransferHandle) {
         ReleaseResponseBuffer(runtime_.flagBufferPool, record);

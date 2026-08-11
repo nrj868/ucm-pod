@@ -253,13 +253,16 @@ std::string DramStore::Readme() const
 Expected<std::vector<std::uint8_t>> DramStore::Lookup(const Detail::BlockId* blocks,
                                                       std::size_t num)
 {
+    UC_DEBUG("[trace] DramStore::Lookup enter, num={}", num);
     if (num == 0) { return std::vector<std::uint8_t>{}; }
     if (blocks == nullptr || num > config->maxIoEntries) {
         return Status::InvalidParam("invalid lookup input");
     }
     auto submitted = taskManager->SubmitLookup(blocks, num);
     if (!submitted) { return submitted.Error(); }
-    return taskManager->WaitLookup(std::move(submitted).Value());
+    auto result = taskManager->WaitLookup(std::move(submitted).Value());
+    UC_DEBUG("[trace] DramStore::Lookup exit, ok={}", result ? 1 : 0);
+    return result;
 }
 
 Expected<ssize_t> DramStore::LookupOnPrefix(const Detail::BlockId* blocks, std::size_t num)
@@ -295,7 +298,11 @@ Expected<Detail::TaskHandle> DramStore::SubmitTransfer(OpType op, Detail::TaskDe
 {
     if (task.empty()) { return Status::InvalidParam("invalid transfer task"); }
 
-    return taskManager->SubmitTransfer(op, std::move(task));
+    UC_DEBUG("[trace] DramStore::{} enter", op == OpType::DUMP ? "Dump" : "Load");
+    auto result = taskManager->SubmitTransfer(op, std::move(task));
+    UC_DEBUG("[trace] DramStore::{} exit, ok={}", op == OpType::DUMP ? "Dump" : "Load",
+             result ? 1 : 0);
+    return result;
 }
 
 Expected<bool> DramStore::Check(Detail::TaskHandle taskId) { return taskManager->Check(taskId); }

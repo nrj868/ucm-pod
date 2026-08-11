@@ -495,6 +495,7 @@ Status HixlTransport::ExecuteSync(const Operation& batch)
 
 Status HixlTransport::ExecuteAsync(const Operation& batch, TransferHandle& handle)
 {
+    UC_DEBUG("[trace] HIXL::ExecuteAsync enter target={}", batch.target_manager);
     std::shared_lock<std::shared_mutex> lifecycle_lock(lifecycle_mutex_);
     handle = kInvalidTransferHandle;
     if (role_ == HixlRole::Server) {
@@ -527,6 +528,8 @@ Status HixlTransport::ExecuteAsync(const Operation& batch, TransferHandle& handl
     // Ascend A2 with HIXL 8.5.1 cannot execute Host-memory transfers through
     // the native async path. Queue the working synchronous API on the instance
     // worker while preserving the upper-layer async handle and polling lifecycle.
+    UC_DEBUG("[trace] HIXL::ExecuteAsync uses_host={} opcode={}",
+             uses_host_memory, static_cast<int>(batch.opcode));
     if (uses_host_memory) {
         std::shared_future<Status> queued_sync;
         const auto status = instances_[local_index]->QueueTransferSync(

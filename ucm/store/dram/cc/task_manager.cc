@@ -123,6 +123,7 @@ Expected<bool> TaskManager::Check(TaskId taskId)
 
 Expected<TaskManager::TaskResult> TaskManager::WaitResult(TaskId taskId)
 {
+    UC_DEBUG("[trace] TM::WaitResult enter task={}", static_cast<size_t>(taskId));
     std::future<TaskResult> future;
     {
         std::lock_guard lock(taskMutex_);

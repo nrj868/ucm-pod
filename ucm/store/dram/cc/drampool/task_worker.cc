@@ -95,6 +95,7 @@ Status TaskWorker::ProcessOneRequest(RequestTaskPtr task)
 Status TaskWorker::ProcessDump(const KvDumpRequest& request,
                                const transport::ManagerID& peerOneSidedId)
 {
+    UC_DEBUG("[trace] DP::ProcessDump enter, batch_size={}", request.batch_size);
     if (runtime_.protocol.GetPackedResponseSize(KvOpcode::Dump, request.batch_size) >
         g_config.flagBufferSlotSizeBytes) {
         return Status::InvalidParam("DUMP response exceeds configured flag buffer slot size");
@@ -180,6 +181,7 @@ Status TaskWorker::ProcessDump(const KvDumpRequest& request,
 Status TaskWorker::ProcessLoad(const KvLoadRequest& request,
                                const transport::ManagerID& peerOneSidedId)
 {
+    UC_DEBUG("[trace] DP::ProcessLoad enter, batch_size={}", request.batch_size);
     if (runtime_.protocol.GetPackedResponseSize(KvOpcode::Load, request.batch_size) >
         g_config.flagBufferSlotSizeBytes) {
         return Status::InvalidParam("LOAD response exceeds configured flag buffer slot size");
@@ -257,6 +259,7 @@ Status TaskWorker::ProcessLoad(const KvLoadRequest& request,
 Status TaskWorker::ProcessLookup(const KvLookupRequest& request,
                                  const transport::ManagerID& peerOneSidedId)
 {
+    UC_DEBUG("[trace] DP::ProcessLookup enter, batch_size={}", request.batch_size);
     if (runtime_.protocol.GetPackedResponseSize(KvOpcode::Lookup, request.batch_size) >
         g_config.flagBufferSlotSizeBytes) {
         return Status::InvalidParam("LOOKUP response exceeds configured flag buffer slot size");
