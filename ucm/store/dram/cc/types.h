@@ -127,6 +127,7 @@ struct NodeSchedulerConfig {
     NodeLimits limits;
     std::chrono::milliseconds reconnectInterval{0};
     std::size_t runnerCount{1};
+    std::int32_t deviceId{0};
 };
 
 struct TransportRuntimeConfig {

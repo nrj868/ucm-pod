@@ -272,3 +272,17 @@ UcmPipelineStoreBuilder.register("Delegator", _delegator_pipeline_builder)
 UcmPipelineStoreBuilder.register(
     "Cache|Compress|Posix", _build_cache_compress_posix_pipeline
 )
+
+
+def _dram_pipeline_builder(
+    config: Dict[str, object], pipeline: ucmpipelinestore.PipelineStore
+):
+    # DramStore is a P2P KV-cache client over one-sided transport (hixl on
+    # Ascend, soft-RoCE/ibverbs on x86). Loaded as a leaf store via the same
+    # dlopen mechanism as Cache/Posix/etc.; libdramstore.so exports
+    # MakeDramStore, which PipelineStore.Stack resolves and calls Setup on.
+    store_dir = Path(__file__).resolve().parent.parent
+    pipeline.Stack("Dram", str(store_dir / "dram/libdramstore.so"), config)
+
+
+UcmPipelineStoreBuilder.register("Dram", _dram_pipeline_builder)

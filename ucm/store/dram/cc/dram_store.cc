@@ -100,17 +100,29 @@ private:
     Status Compose()
     {
 #ifdef UC_DRAM_ASCEND_BACKEND
+        {
+            const auto initRet = aclInit(nullptr);
+            if (initRet != ACL_SUCCESS && initRet != ACL_ERROR_REPEAT_INITIALIZE) {
+                return Status::Error("aclInit failed: " + std::to_string(initRet));
+            }
+            const auto setRet = aclrtSetDevice(config->transportDeviceId);
+            if (setRet != ACL_SUCCESS) {
+                return Status::Error("aclrtSetDevice failed: " + std::to_string(setRet));
+            }
+        }
         const auto transferTimeout = std::max(config->taskTimeouts.load, config->taskTimeouts.dump);
-        auto createdBackend = CreateTransportManagerBackend(TransportManagerBackendOptions{
+        TransportManagerBackendOptions backendOpts{
             config->localControlHost, config->localControlPort, config->localTransportManagerId,
             config->localHost, config->transportDeviceId, 1000,
             static_cast<std::int32_t>(std::min<std::int64_t>(
                 transferTimeout.count(), std::numeric_limits<std::int32_t>::max())),
-            config->nodeScheduler.nodes});
+            config->nodeScheduler.nodes};
+        auto createdBackend = CreateTransportManagerBackend(std::move(backendOpts));
         if (!createdBackend) { return createdBackend.Error(); }
         transportBackend = std::move(createdBackend).Value();
 
         auto createdReplies = ReplyService::Create(ReplyService::Options{
+            config->transportDeviceId,
             config->replySlotSize, config->replySlotCount, std::chrono::microseconds{50},
             [this](NodeId nodeId, NodeEvent event) {
                 nodeScheduler->Publish(nodeId, std::move(event));
@@ -121,7 +133,7 @@ private:
         memoryHandles.reserve(1);
         const auto replyMemory = replyService->MemoryRegion();
         auto registeredReply = transportBackend->RegisterMemory(
-            replyMemory.address, replyMemory.length, MemoryRegionType::HOST);
+            replyMemory.address, replyMemory.length, MemoryRegionType::DEVICE);
         if (!registeredReply) { return registeredReply.Error(); }
         memoryHandles.push_back(std::move(registeredReply).Value());
 
@@ -167,14 +179,7 @@ private:
                                                    ? nodeScheduler->Post(request)
                                                    : Status::Error("NodeScheduler is unavailable");
                                     }});
-
-        auto status = transport->Start();
-        if (status.Failure()) { return status; }
-        status = taskManager->Start();
-        if (status.Failure()) { return status; }
-        status = replyService->Start();
-        if (status.Failure()) { return status; }
-        return nodeScheduler->Start();
+        return Status::OK();
 #else
         return Status::Unsupported();
 #endif
@@ -236,9 +241,15 @@ Expected<std::vector<std::uint8_t>> DramStore::Lookup(const Detail::BlockId* blo
     return taskManager->WaitLookup(std::move(submitted).Value());
 }
 
-Expected<ssize_t> DramStore::LookupOnPrefix(const Detail::BlockId*, std::size_t)
+Expected<ssize_t> DramStore::LookupOnPrefix(const Detail::BlockId* blocks, std::size_t num)
 {
-    return Status::Unsupported();
+    auto looked = Lookup(blocks, num);
+    if (!looked) { return looked.Error(); }
+    const auto& founds = looked.Value();
+    for (std::size_t i = 0; i < founds.size(); ++i) {
+        if (founds[i] == 0) { return static_cast<ssize_t>(i) - 1; }
+    }
+    return static_cast<ssize_t>(num) - 1;
 }
 
 void DramStore::Prefetch(const Detail::BlockId*, std::size_t) {}
@@ -313,6 +324,15 @@ Status DramStore::RegisterKVCaches(const KVCacheRegistration* registrations, std
         }
         return result;
     }
+
+    auto status = transport->Start();
+    if (status.Failure()) { return status; }
+    status = taskManager->Start();
+    if (status.Failure()) { return status; }
+    status = replyService->Start();
+    if (status.Failure()) { return status; }
+    status = nodeScheduler->Start();
+    if (status.Failure()) { return status; }
     return Status::OK();
 }
 

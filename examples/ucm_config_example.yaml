@@ -13,11 +13,17 @@
 ucm_connectors:
   - ucm_connector_name: "UcmPipelineStore"
     ucm_connector_config:
-      store_pipeline: "Cache|Posix"
+      store_pipeline: "Dram"
       storage_backends: "/mnt/test"
       io_direct: false
-      # cache_buffer_capacity_gb: 256
-      # posix_capacity_gb: 1024
+      local_control_endpoint: "127.0.0.1:4702"
+      local_host: "127.0.0.1"
+      local_transport_manager_id: "127.0.0.1:4502"
+      node_control_endpoints: ["127.0.0.1:9000"]
+      node_transport_manager_ids: ["127.0.0.1:4501"]
+      transport_device_id: 0
+      node_ids: [1]
+      max_io_entries: 10000  # ?? max io entries 体现什么？ 应该按照容量来约束
 
 # When you use UcmNfsStore, you should set enable_event_sync to false.
 enable_event_sync: true

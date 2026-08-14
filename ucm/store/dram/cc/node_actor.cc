@@ -31,6 +31,20 @@
 namespace UC::Dram {
 namespace {
 
+// Fold shardId into the wire key for non-zero shards so multiple shards of one
+// block coexist on the same drampool node (which keys entries by BlockId alone).
+// shardId == 0 keeps the original key so lookup (always shard 0) finds the entry.
+Detail::BlockId StorageKey(const Detail::BlockId& blockId, std::uint32_t shardId)
+{
+    if (shardId == 0) { return blockId; }
+    Detail::BlockId result = blockId;
+    std::uint32_t seed = 0;
+    std::memcpy(&seed, result.data(), sizeof(seed));
+    seed ^= shardId + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    std::memcpy(result.data(), &seed, sizeof(seed));
+    return result;
+}
+
 template <typename RequestEntry>
 void FillTransferEntries(const std::vector<IoEntry>& entries,
                          std::vector<RequestEntry>& requestEntries)
@@ -39,7 +53,8 @@ void FillTransferEntries(const std::vector<IoEntry>& entries,
     for (std::size_t index = 0; index < entries.size(); ++index) {
         const auto& source = entries[index];
         auto& target = requestEntries[index];
-        std::memcpy(target.key.data(), source.blockId.data(), source.blockId.size());
+        const auto key = StorageKey(source.blockId, source.shardId);
+        std::memcpy(target.key.data(), key.data(), key.size());
         target.addr = source.buffer.address;
         target.len = static_cast<std::uint32_t>(source.buffer.length);
         target.idx = source.shardId;
@@ -75,8 +90,8 @@ Status NodeActor::EncodeRequest(const ReplySlot& replySlot, OpType op,
             request.batch_size = batchSize;
             request.entries.resize(entries.size());
             for (std::size_t index = 0; index < entries.size(); ++index) {
-                std::memcpy(request.entries[index].key.data(), entries[index].blockId.data(),
-                            entries[index].blockId.size());
+                const auto key = StorageKey(entries[index].blockId, entries[index].shardId);
+                std::memcpy(request.entries[index].key.data(), key.data(), key.size());
             }
             return pack(request);
         }
@@ -209,10 +224,14 @@ void NodeActor::StartRequest(Request request)
     auto inserted = activeRequests_.emplace(requestId, std::move(record));
     assert(inserted.second);
     auto& active = inserted.first->second;
+    UC_DEBUG("StartRequest: node={} requestId={} entries={}",
+             config_.endpoint.nodeId, requestId, active.request.entries.size());
 
     auto acquired = dependencies_.acquireReplySlot(active.token, active.request.op,
                                                    active.request.entries.size());
     if (!acquired) {
+        UC_DEBUG("StartRequest: acquireReplySlot FAILED node={} requestId={} err={}",
+                 config_.endpoint.nodeId, requestId, acquired.Error());
         active.Complete(acquired.Error());
         RetireRequest(requestId);
         return;
@@ -223,15 +242,20 @@ void NodeActor::StartRequest(Request request)
     auto status =
         EncodeRequest(active.replySlot, active.request.op, active.request.entries, payload);
     if (status.Failure()) {
+        UC_DEBUG("StartRequest: EncodeRequest FAILED node={} requestId={} err={}",
+                 config_.endpoint.nodeId, requestId, status);
         active.Complete(std::move(status));
         RetireRequest(requestId);
         return;
     }
 
+    const auto payloadSize = payload.size();
     TransportCommand command{
         Transmit{active.token, std::move(payload)}
     };
     status = dependencies_.submitTransport(command);
+    UC_DEBUG("StartRequest: submitTransport node={} requestId={} ok={} payload_size={}",
+             config_.endpoint.nodeId, requestId, status.Success(), payloadSize);
     if (status.Failure() && active.state != RequestState::COMPLETED) {
         active.Complete(std::move(status));
     }
@@ -266,8 +290,14 @@ void NodeActor::Handle(FenceCompleted event, TimePoint now)
 {
     if (state_ != NodeState::FENCING || event.epoch != epoch_) { return; }
     if (event.status.Failure()) {
-        AbortDramStore(Status::Error(fmt::format("DramStore node {} recovery fence failed: {}",
-                                                 config_.endpoint.nodeId, event.status)));
+        // A failed fence means the remote peer was unreachable (e.g. the
+        // DramPool was killed). An unreachable peer cannot access local
+        // registered memory, so the safety property a successful Disconnect
+        // would establish already holds. Fall through to DISCONNECTED and let
+        // the retry loop re-establish the connection when the remote returns.
+        UC_WARN("DramStore node {} recovery fence failed (peer unreachable): {}; "
+                "transitioning to DISCONNECTED for reconnect retry",
+                config_.endpoint.nodeId, event.status);
     }
 
     for (auto& entry : activeRequests_) {

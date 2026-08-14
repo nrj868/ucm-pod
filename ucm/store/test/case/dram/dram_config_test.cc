@@ -81,16 +81,37 @@ TEST(DramConfigTest, CapsDerivedNodeAndReplyCapacities)
     EXPECT_EQ(config.replySlotSize, std::uint32_t{65});
 }
 
-TEST(DramConfigTest, DerivesRuntimeWorkersFromHardwareAndNodeCount)
+TEST(DramConfigTest, DerivesDefaultRunnerAndWorkerCounts)
 {
     auto input = BaseConfig();
     auto parsed = DramConfig::Parse(input);
     ASSERT_TRUE(parsed);
-    const auto hardwareThreads =
-        std::max<std::size_t>(1, static_cast<std::size_t>(std::thread::hardware_concurrency()));
-    const auto expected = std::min<std::size_t>(2, std::max<std::size_t>(1, hardwareThreads / 2));
-    EXPECT_EQ(parsed.Value().nodeScheduler.runnerCount, expected);
-    EXPECT_EQ(parsed.Value().transportRuntime.workerCount, expected);
+    // BaseConfig has 2 nodes; runnerCount defaults to min(4, nodeCount)=2,
+    // workerCount defaults to 1 (single-worker serialization).
+    EXPECT_EQ(parsed.Value().nodeScheduler.runnerCount, std::size_t{2});
+    EXPECT_EQ(parsed.Value().transportRuntime.workerCount, std::size_t{1});
+}
+
+TEST(DramConfigTest, OverridesWorkerCountIndependently)
+{
+    auto input = BaseConfig();
+    input.SetNumber("transport_worker_count", 7);
+    auto parsed = DramConfig::Parse(input);
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(parsed.Value().transportRuntime.workerCount, std::size_t{7});
+    // runnerCount stays at its default; transport_worker_count no longer
+    // forces both subsystems to the same value.
+    EXPECT_EQ(parsed.Value().nodeScheduler.runnerCount, std::size_t{2});
+}
+
+TEST(DramConfigTest, OverridesRunnerCountIndependently)
+{
+    auto input = BaseConfig();
+    input.SetNumber("node_runner_count", 3);
+    auto parsed = DramConfig::Parse(input);
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(parsed.Value().nodeScheduler.runnerCount, std::size_t{3});
+    EXPECT_EQ(parsed.Value().transportRuntime.workerCount, std::size_t{1});
 }
 
 TEST(DramConfigTest, ParsesFixedReconnectInterval)

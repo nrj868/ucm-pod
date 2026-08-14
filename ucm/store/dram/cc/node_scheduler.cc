@@ -31,6 +31,8 @@
 #include <thread>
 #include <utility>
 #include "node_actor.h"
+#include <acl/acl.h>
+#include "logger/logger.h"
 
 namespace UC::Dram {
 namespace {
@@ -137,6 +139,16 @@ void NodeScheduler::Publish(NodeId nodeId, NodeEvent event)
 void NodeScheduler::RunActors(Runner& runner) noexcept
 {
     try {
+        auto ret = aclInit(nullptr);
+        if (ret != ACL_SUCCESS && ret != ACL_ERROR_REPEAT_INITIALIZE) {
+            UC_ERROR("aclInit failed: {}", std::to_string(ret));
+            return;
+        }
+        ret = aclrtSetDevice(config_.deviceId);
+        if (ret != ACL_SUCCESS) {
+            UC_ERROR("aclrtSetDevice failed: {}", std::to_string(ret));
+            return;
+        }
         auto nextWakeup = TimePoint::min();
         for (;;) {
             {
