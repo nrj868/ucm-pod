@@ -647,6 +647,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                 path for path in config["storage_backends"].split(":")
             ]
         config["unique_id"] = f"{self.unique_id}_fawa_{store_suffix}"
+        config["role"] = self._role.name.lower()
         self._namespace_storage_backends(config, store_suffix)
         dp_rank = self._vllm_config.parallel_config.data_parallel_rank
         config["posix_gc_enable"] = (

@@ -73,6 +73,7 @@ public:
     Status Wait(Detail::TaskHandle taskId) override;
 
 private:
+    Status RegisterKvBuffers(const DramConfig& config);
     Expected<Detail::TaskHandle> SubmitTransfer(OpType op, Detail::TaskDesc task);
     Status Start();
 
@@ -177,7 +178,11 @@ private:
                                                    ? nodeScheduler_->Post(request)
                                                    : Status::Error("NodeScheduler is unavailable");
                                     }});
-        return config_->role == Role::SCHEDULER ? Start() : Status::OK();
+        if (config_->role != Role::SCHEDULER) {
+            const auto registerStatus = RegisterKvBuffers(*config_);
+            if (registerStatus.Failure()) { return registerStatus; }
+        }
+        return Start();
 #else
         return Status::Unsupported();
 #endif
@@ -236,6 +241,41 @@ Status DramStore::Setup(const Detail::Dictionary& config)
         config_->nodeScheduler.nodes.size(), config_->maxIoEntries,
         config_->nodeScheduler.limits.maxBatchEntries,
         config_->nodeScheduler.limits.maxInflightRequests, config_->replySlotCount);
+    return Status::OK();
+}
+
+Status DramStore::RegisterKvBuffers(const DramConfig& config)
+{
+    if (config.gpuKvBufferAddrs.empty()) { return Status::OK(); }
+    if (!transportBackend_) { return Status::Error("DramStore transport backend is unavailable"); }
+
+    const auto firstHandle = memoryHandles_.size();
+    memoryHandles_.reserve(firstHandle + config.gpuKvBufferAddrs.size());
+
+    for (std::size_t index = 0; index < config.gpuKvBufferAddrs.size(); ++index) {
+        auto registered = transportBackend_->RegisterMemory(
+            reinterpret_cast<void*>(config.gpuKvBufferAddrs[index]), config.gpuKvBufferSizes[index],
+            MemoryRegionType::DEVICE);
+        if (registered) {
+            memoryHandles_.push_back(std::move(registered).Value());
+            continue;
+        }
+
+        auto result = registered.Error();
+        while (memoryHandles_.size() > firstHandle) {
+            const auto cleanup = transportBackend_->UnregisterMemory(memoryHandles_.back());
+            if (cleanup.Failure()) {
+                result = cleanup;
+                break;
+            }
+            memoryHandles_.pop_back();
+        }
+        UC_ERROR("DramStore GPU KV buffer registration failed, failed_index={} count={} status={}",
+                 index, config.gpuKvBufferAddrs.size(), result);
+        return result;
+    }
+
+    UC_INFO("DramStore GPU KV buffers registered, count={}", config.gpuKvBufferAddrs.size());
     return Status::OK();
 }
 

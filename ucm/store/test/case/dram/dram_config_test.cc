@@ -107,6 +107,34 @@ TEST(UCDramConfigTest, ParsesFixedReconnectInterval)
 
 TEST(UCDramConfigTest, RequiresTensorSizes) { EXPECT_FALSE(DramConfig::Parse(BaseConfig(false))); }
 
+TEST(UCDramConfigTest, ParsesGpuKvBuffers)
+{
+    auto input = BaseConfig();
+    input.Set("gpu_kv_buffer_addrs", std::vector<ssize_t>{4096, 8192});
+    input.Set("gpu_kv_buffer_sizes", std::vector<ssize_t>{1024, 2048});
+    auto parsed = DramConfig::Parse(input);
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(parsed.Value().gpuKvBufferAddrs, (std::vector<std::uintptr_t>{4096, 8192}));
+    EXPECT_EQ(parsed.Value().gpuKvBufferSizes, (std::vector<std::size_t>{1024, 2048}));
+}
+
+TEST(UCDramConfigTest, RejectsInvalidGpuKvBuffers)
+{
+    auto mismatched = BaseConfig();
+    mismatched.Set("gpu_kv_buffer_addrs", std::vector<ssize_t>{4096});
+    EXPECT_FALSE(DramConfig::Parse(mismatched));
+
+    auto zeroAddress = BaseConfig();
+    zeroAddress.Set("gpu_kv_buffer_addrs", std::vector<ssize_t>{0});
+    zeroAddress.Set("gpu_kv_buffer_sizes", std::vector<ssize_t>{1024});
+    EXPECT_FALSE(DramConfig::Parse(zeroAddress));
+
+    auto zeroSize = BaseConfig();
+    zeroSize.Set("gpu_kv_buffer_addrs", std::vector<ssize_t>{4096});
+    zeroSize.Set("gpu_kv_buffer_sizes", std::vector<ssize_t>{0});
+    EXPECT_FALSE(DramConfig::Parse(zeroSize));
+}
+
 TEST(UCDramConfigTest, ParsesRouterTypeIntoStrongConfiguration)
 {
     auto input = BaseConfig();
